@@ -75,8 +75,9 @@
 #    · 请遵守对应服务的使用条款，仅用于纳管你自己的账号，勿作违规用途。
 #
 #  上游与许可（本文件只是部署脚本，程序本体来自以下开源项目）：
-#    · 网关 workbuddy2api     https://github.com/Sliverkiss/workbuddy2api   (MIT)
+#    · 网关 workbuddy2api     https://github.com/HanawaBanana/workbuddy2api (MIT)
 #    · 面板 workbuddy-manager https://github.com/ithtelab/workbuddy-manager (MIT)
+#    · 特别致敬与感谢: 科技Lion Linux 工具箱 (https://kejilion.sh) 优秀的建站反代与运维生态
 #    本脚本可按 MIT 许可自由使用/修改/再分发，保留上方版权与许可声明即可。
 # =============================================================================
 set -euo pipefail

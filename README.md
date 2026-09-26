@@ -240,7 +240,9 @@ cat /opt/wb2api/.credentials
 
 ## 📄 开源许可与致谢
 
-- 网关本体与定时任务引擎：[HanawaBanana/workbuddy2api](https://github.com/HanawaBanana/workbuddy2api) (原 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)) (MIT License)
-- 面板本体：[ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) (MIT License)
-- 自动化增强脚本与一键运维方案遵循 MIT 开源协议。
+- **网关本体与定时任务引擎**：[HanawaBanana/workbuddy2api](https://github.com/HanawaBanana/workbuddy2api) (原 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)) (MIT License)
+- **面板本体**：[ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) (MIT License)
+- **特别致敬与感谢**：[kejilion.sh (科技Lion Linux 工具箱)](https://kejilion.sh/) — 感谢科技Lion团队为 Linux VPS 运维带来的杰出一键化建站、反向代理与 SSL 体验，本脚本深度融合了科技Lion环境，实现了无缝共存与零冲突协同。
+- **协议**：本一键部署与反代增强套件遵循 MIT 开源协议。
+
 
