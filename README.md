@@ -63,7 +63,7 @@ flowchart TD
 ### 1. 全自动推荐部署（适合已有域名）
 如果你的域名解析已指向服务器公网 IP：
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<your-repo>/workbuddy-deploy.sh | sudo bash -s -- --domain workbuddy.example.com --auto
+curl -fsSL https://raw.githubusercontent.com/macsur/WorkBuddy/main/workbuddy-deploy.sh | sudo bash -s -- --domain workbuddy.example.com --auto
 ```
 
 ### 2. 交互式向导部署（推荐新手）
