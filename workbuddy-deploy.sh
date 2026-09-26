@@ -42,7 +42,7 @@
 #    NONINTERACTIVE=1 DOMAIN=wb.example.com bash deploy-workbuddy-share.sh
 #
 #  可用环境变量覆盖默认值：
-#    WB2API_IMAGE    上游网关镜像  默认 ghcr.io/yys9253462-gif/workbuddy2api:latest
+#    WB2API_IMAGE    上游网关镜像  默认 ghcr.io/hanawabanana/workbuddy2api:latest
 #    MANAGER_IMAGE   面板镜像      默认 ghcr.io/yys9253462-gif/workbuddy-manager-multiarch:latest
 #    BASE_DIR        安装根目录    默认 /opt/wb2api
 #    API_KEY         上游 api_key  默认随机生成
@@ -81,13 +81,13 @@
 # =============================================================================
 set -euo pipefail
 
-WB2API_IMAGE="${WB2API_IMAGE:-ghcr.io/yys9253462-gif/workbuddy2api:latest}"
+WB2API_IMAGE="${WB2API_IMAGE:-ghcr.io/hanawabanana/workbuddy2api:latest}"
 MANAGER_IMAGE="${MANAGER_IMAGE:-ghcr.io/yys9253462-gif/workbuddy-manager-multiarch:latest}"
 BASE_DIR="${BASE_DIR:-/opt/wb2api}"
 UP_DIR="$BASE_DIR/workbuddy2api"
 MG_DIR="$BASE_DIR/workbuddy-manager"
 # 与上面两个镜像变量保持一致：允许环境变量覆盖（自建 fork / 私服 / 排障时有用）
-REPO_UP="${REPO_UP:-https://github.com/yys9253462-gif/workbuddy2api.git}"
+REPO_UP="${REPO_UP:-https://github.com/HanawaBanana/workbuddy2api.git}"
 REPO_MG="${REPO_MG:-https://github.com/yys9253462-gif/workbuddy-manager.git}"
 UP_UID=10001                      # 上游容器内 app 用户的 uid，卷属主必须一致
 
@@ -518,6 +518,7 @@ explain_clone_err() {
 step "安装上游 workbuddy2api"
 if [ -d "$UP_DIR/.git" ]; then
   if [ "$SYNC_CODE" = "1" ]; then
+    git -C "$UP_DIR" remote set-url origin "$REPO_UP" >/dev/null 2>&1 || true
     if git -C "$UP_DIR" fetch --depth 1 origin master >/dev/null 2>&1 \
        && git -C "$UP_DIR" reset --hard origin/master >/dev/null 2>&1; then
       ok "已同步到远端 master（不动 config.json / auths/ / data/）"
@@ -545,39 +546,224 @@ else
 fi
 
 if [ ! -f "$UP_DIR/config.json" ]; then
-  # 以仓库示例为底，只改 api_key 与监听地址（其余保持项目默认值）
+  # 以仓库示例为底，配置 api_key、监听地址、六大定时积分任务与 admin 管理端点
   python3 - "$UP_DIR" "$API_KEY" <<'PY'
 import json, sys
 up, key = sys.argv[1], sys.argv[2]
-with open(f"{up}/config.example.json", encoding="utf-8") as f:
-    cfg = json.load(f)
+try:
+    with open(f"{up}/config.example.json", encoding="utf-8") as f:
+        cfg = json.load(f)
+except Exception:
+    cfg = {}
+
 cfg["api_key"] = key
 cfg["listen"] = "0.0.0.0:7863"          # 容器内监听；宿主侧只绑 127.0.0.1
+
+# 开启管理端点（支持 POST /admin/tasks/{name}/run 补跑与 ./acct.sh 管理）
+if "admin" not in cfg or not isinstance(cfg["admin"], dict):
+    cfg["admin"] = {}
+cfg["admin"]["enabled"] = True
+cfg["admin"]["audit_enabled"] = True
+cfg["admin"]["audit_file"] = "./data/admin_audit.log"
+
+# 配置六大定时积分任务体系
+if "schedule" not in cfg or not isinstance(cfg["schedule"], dict):
+    cfg["schedule"] = {}
+sch = cfg["schedule"]
+sch.setdefault("checkin_hours", [9, 21])
+sch.setdefault("travel_hours", [9, 21])
+sch.setdefault("activity_hours", [10])
+sch.setdefault("keepalive_hours", [22])
+sch.setdefault("school_hours", [12])
+sch.setdefault("cat_hours", [1])
+sch.setdefault("checkin_enabled", True)
+sch.setdefault("travel_enabled", True)
+sch.setdefault("activity_enabled", True)
+sch.setdefault("keepalive_enabled", True)
+sch.setdefault("school_enabled", True)
+sch.setdefault("cat_enabled", True)
+sch.setdefault("jitter_minutes", 0)
+
 with open(f"{up}/config.json", "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
 PY
-  ok "生成 config.json（api_key 已设置）"
+  ok "生成 config.json（已配置六大定时积分任务与 admin 管理端点）"
 else
-  # config.json 已存在 —— 核对它的 api_key 与本脚本用的是否一致。
-  # 不一致有两种来源：① 凭据文件丢过（CRED_LOST=1，必须自动对齐）② 人为改过其中一边（只警告）
-  CFG_KEY="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8')).get('api_key',''))" "$UP_DIR/config.json" 2>/dev/null || echo "")"
-  if [ "$CFG_KEY" = "$API_KEY" ]; then
-    ok "config.json 已存在，api_key 一致"
-  elif [ "${CRED_LOST:-0}" = "1" ]; then
-    python3 - "$UP_DIR/config.json" "$API_KEY" <<'PY'
+  # config.json 已存在 —— 确保同步最新 schedule 定时任务和 admin 端点设置
+  python3 - "$UP_DIR/config.json" "$API_KEY" "${CRED_LOST:-0}" <<'PY'
 import json, sys
-p, key = sys.argv[1], sys.argv[2]
-cfg = json.load(open(p, encoding='utf-8'))
-cfg['api_key'] = key
-json.dump(cfg, open(p, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
+p, key, cred_lost = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    cfg = json.load(open(p, encoding='utf-8'))
+except Exception:
+    cfg = {}
+
+# 对齐 api_key
+if cred_lost == "1" or not cfg.get("api_key"):
+    cfg["api_key"] = key
+
+# 补齐 admin 端点
+if "admin" not in cfg or not isinstance(cfg["admin"], dict):
+    cfg["admin"] = {}
+cfg["admin"]["enabled"] = True
+cfg["admin"].setdefault("audit_enabled", True)
+cfg["admin"].setdefault("audit_file", "./data/admin_audit.log")
+
+# 补齐六大定时积分任务
+if "schedule" not in cfg or not isinstance(cfg["schedule"], dict):
+    cfg["schedule"] = {}
+sch = cfg["schedule"]
+sch.setdefault("checkin_hours", [9, 21])
+sch.setdefault("travel_hours", [9, 21])
+sch.setdefault("activity_hours", [10])
+sch.setdefault("keepalive_hours", [22])
+sch.setdefault("school_hours", [12])
+sch.setdefault("cat_hours", [1])
+sch.setdefault("checkin_enabled", True)
+sch.setdefault("travel_enabled", True)
+sch.setdefault("activity_enabled", True)
+sch.setdefault("keepalive_enabled", True)
+sch.setdefault("school_enabled", True)
+sch.setdefault("cat_enabled", True)
+sch.setdefault("jitter_minutes", 0)
+
+with open(p, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
 PY
-    ok "config.json 已存在但 api_key 是旧的 —— 已同步为最新值"
-  else
-    warn "config.json 的 api_key 与 $CRED_FILE 不一致（配置 ${CFG_KEY:0:8}… / 凭据 ${API_KEY:0:8}…）"
-    warn "  · 想保留 config.json 的值 → 把凭据文件里的 API_KEY 改成同一把"
-    warn "  · 想让两边自动对齐   → 删掉 config.json 后重跑本脚本"
-  fi
+  ok "config.json 已同步六大定时积分任务配置与 admin 管理端点"
 fi
+
+# 生成/强化 acct.sh 脚本，支持宿主机无 Go 环境时自动使用 Python 兜底执行管理与补跑
+cat > "$UP_DIR/acct.sh" << 'ACCT_EOF'
+#!/usr/bin/env bash
+# acct.sh — 账号运维工具包装（临时停用 / 恢复 / 复活 / 定时任务补跑）
+set -euo pipefail
+cd "$(dirname "$0")"
+
+if command -v go >/dev/null 2>&1; then
+  exec go run ./cmd/acct "$@"
+fi
+
+python3 - "$@" <<'PYEOF'
+import sys, json, urllib.request, urllib.error, os
+
+args = sys.argv[1:]
+if not args or args[0] in ("-h", "--help"):
+    print("用法:")
+    print("  ./acct.sh list                     # 列出账号与双位状态")
+    print("  ./acct.sh disable <uid> [原因]     # 临时停用")
+    print("  ./acct.sh enable  <uid>            # 解除手动停用")
+    print("  ./acct.sh revive  <uid>            # 解除系统自动禁用")
+    print("  ./acct.sh task    <name>           # 手动触发排程任务 (checkin/activity/keepalive/travel/school/cat)")
+    sys.exit(0)
+
+cfg_path = "config.json"
+if not os.path.isfile(cfg_path):
+    print("错误: 找不到 config.json", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+except Exception as e:
+    print(f"错误: 解析 config.json 失败: {e}", file=sys.stderr)
+    sys.exit(1)
+
+listen = cfg.get("listen", "127.0.0.1:7863")
+if ":" in listen:
+    host, port = listen.rsplit(":", 1)
+else:
+    host, port = "127.0.0.1", listen
+if host in ("", "0.0.0.0", "::"):
+    host = "127.0.0.1"
+
+base_url = f"http://{host}:{port}"
+api_key = cfg.get("api_key", "")
+
+def req(method, path, data=None):
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    body = None
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(data).encode("utf-8")
+    r = urllib.request.Request(f"{base_url}{path}", data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(r, timeout=30) as resp:
+            return resp.status, resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8")
+    except Exception as e:
+        print(f"请求网关失败: {e}", file=sys.stderr)
+        sys.exit(1)
+
+cmd = args[0]
+if cmd == "list":
+    st, resp = req("GET", "/status")
+    if st != 200:
+        print(f"GET /status 返回 {st}: {resp}", file=sys.stderr)
+        sys.exit(1)
+    data = json.loads(resp)
+    accts = data.get("accounts", [])
+    if not accts:
+        print("（池里没有账号）")
+        sys.exit(0)
+    print(f"{'UID':<38} {'REALM':<7} {'NICKNAME':<18} {'CREDITS':>8}  STATE")
+    for a in accts:
+        state = []
+        if a.get("manual_disabled"): state.append(f"手动停用({a.get('manual_reason', '')})")
+        if a.get("disabled"): state.append(f"自动禁用({a.get('disabled_reason', '')})")
+        if a.get("cooling"): state.append("冷却中")
+        state_str = " + ".join(state) if state else "正常"
+        nick = (a.get("nickname") or "")[:18]
+        print(f"{a.get('uid', ''):<38} {a.get('realm', '').upper():<7} {nick:<18} {a.get('credits', 0):>8}  {state_str}")
+
+elif cmd == "task":
+    if len(args) < 2:
+        print("用法: ./acct.sh task <name> (可用: checkin / activity / keepalive / travel / school / cat)", file=sys.stderr)
+        sys.exit(1)
+    tname = args[1]
+    valid = ["checkin", "activity", "keepalive", "travel", "school", "cat"]
+    if tname not in valid:
+        print(f"404：任务名不存在（可用: {' / '.join(valid)}）", file=sys.stderr)
+        sys.exit(1)
+    st, resp = req("POST", f"/admin/tasks/{tname}/run")
+    if st == 202:
+        print(f"已受理：{tname} 已在网关后台开跑（进度看网关日志）")
+    elif st == 409:
+        print(f"409：该任务已有一趟在跑，等它跑完再触发", file=sys.stderr)
+        sys.exit(1)
+    elif st == 404:
+        print(f"404：{resp}（可能是 admin.enabled 未开启）", file=sys.stderr)
+        sys.exit(1)
+    elif st == 401:
+        print("401：api_key 不对", file=sys.stderr)
+        sys.exit(1)
+    else:
+        print(f"{st}: {resp}", file=sys.stderr)
+        sys.exit(1)
+
+elif cmd in ("disable", "enable", "revive"):
+    if len(args) < 2:
+        print(f"用法: ./acct.sh {cmd} <uid> [reason]", file=sys.stderr)
+        sys.exit(1)
+    uid = args[1]
+    reason = args[2] if len(args) > 2 else "manual"
+    body = {"reason": reason} if cmd == "disable" else None
+    st, resp = req("POST", f"/admin/accounts/{uid}/{cmd}", body)
+    if st == 200:
+        verb = {"disable": "已停用", "enable": "已解除停用", "revive": "已复活"}[cmd]
+        print(f"{verb} {uid}")
+    else:
+        print(f"{st}: {resp}", file=sys.stderr)
+        sys.exit(1)
+else:
+    print(f"未知命令: {cmd}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+ACCT_EOF
+chmod +x "$UP_DIR/acct.sh"
 
 mkdir -p "$UP_DIR/auths" "$UP_DIR/data"
 cat > "$UP_DIR/docker-compose.yml" <<YAML
@@ -1285,6 +1471,17 @@ cat <<SUM
 
   ${C_BOLD}下一步${C_0}
 ${NEXT_STEPS}
+
+  ${C_BOLD}定时积分任务（6 类独立排程 + 确定性抖动已启用）${C_0}
+    · 签到 (checkin)   : 09:00 / 21:00（每日签到 + 余额自检自动解冻）
+    · 活跃 (activity)  : 10:00（事件连发点亮活跃地图、补签卡保连登、兑换抽奖）
+    · 猫猫 (travel)    : 09:00 / 21:00（领养 / 派出 / 领奖闭环）
+    · 保活 (keepalive) : 22:00（全账号刷新 token，失效 3 次自动隔离）
+    · 开学 (school)    : 12:00（任务点亮 + claim + 抽空抽奖余额）
+    · 夜猫 (cat)       : 01:00（夜猫窗口 23:00-08:00 补做 black_cat 任务）
+    * 错过窗口可手动异步补跑（回 202，防连点 409）：
+      命令行：docker exec -it ${UP_NAME} ./acct.sh task <name>
+      API请求：curl -X POST http://127.0.0.1:${WB2API_PORT}/admin/tasks/<name>/run -H "Authorization: Bearer <API_KEY>"
 
   ${C_Y}注意${C_0}
 ${FIRST_RUN_NOTE:-    · 凭据以文件 $CRED_FILE 为准（0600，root 可读）。}

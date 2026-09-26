@@ -113,6 +113,87 @@ bash workbuddy-deploy.sh --auto
 
 ---
 
+---
+
+## ⏰ 定时积分任务自动化体系 (6 大任务独立排程)
+
+网关深度集成了全自动积分与账号保活生态，支持 **6 类任务独立排程、独立开关、确定性抖动与手动异步补跑**：
+
+```mermaid
+gantt
+    title WorkBuddy 自动化任务每日排程时刻表 (默认整点分布)
+    dateFormat  HH:mm
+    axisFormat  %H:%M
+    section 夜间/清晨
+    夜猫子任务 (cat - 补黑猫)       :01:00, 10m
+    section 上午
+    每日签到 + 余额自检 (checkin)   :09:00, 15m
+    猫猫旅行推进 (travel)          :09:00, 15m
+    活跃地图连发点亮 (activity)     :10:00, 20m
+    section 中午
+    开学季活动任务 (school)        :12:00, 15m
+    section 晚间
+    二次签到 (checkin)             :21:00, 15m
+    猫猫旅行再推进 (travel)         :21:00, 15m
+    Token 全量保活 (keepalive)     :22:00, 20m
+```
+
+### 📋 六大任务详细说明与功能闭环
+
+| 任务标识 (`name`) | 触发时刻 | 开关配置项 | 任务核心机制与闭环逻辑 |
+| :--- | :---: | :--- | :--- |
+| **`checkin`**<br>每日签到 | **09:00 / 21:00** | `schedule.checkin_enabled` | 每日签到并查询全账号积分余额；若检测到被冻结账号的余额恢复正常，**自动解除冷却解冻账号**。 |
+| **`activity`**<br>活跃地图 | **10:00** | `schedule.activity_enabled` | 对话事件连发上报，点亮活跃地图与连登天数，解锁领养前置；自动使用补签卡保连登、连登档位兑换与抽奖、礼包/补偿领取，回读 streak 自检。 |
+| **`travel`**<br>猫猫旅行 | **09:00 / 21:00** | `schedule.travel_enabled` | 领养 / 派出 / 领奖闭环推进，全流程自动化运行无需人工干预。 |
+| **`keepalive`**<br>Token保活 | **22:00** | `schedule.keepalive_enabled` | 全账号自动刷新 token，仅在 session 失效连续累计 3 次时才禁用隔离账号，防止偶发网络抖动误杀。 |
+| **`school`**<br>开学季任务 | **12:00** | `schedule.school_enabled` | 任务点亮 + claim 领取 + 自动抽空抽奖余额；若上游活动下线则自动跳过，优雅兼容。 |
+| **`cat`**<br>夜猫子任务 | **01:00** | `schedule.cat_enabled` | 位于夜猫窗口（`23:00–08:00 CST`）内，自动补做一次 `black_cat` 专属积分任务。 |
+
+---
+
+### 🎲 确定性防封抖动机制 (`schedule.jitter_minutes`)
+
+为了防止整点并发请求被上游 WAF / 风控识别，系统支持 **确定性时间抖动**：
+
+- **缺省值**：`0`（精确整点触发，行为等同于系统 crontab 的 `0 9 * * *`）。
+- **启用抖动**：在 `config.json` 中配置正整数（如 `30`），任务将在名义时点之后的 `0 ~ 30` 分钟窗口内摊开触发。
+- **确定性散列派生**：
+  $$\text{Offset} = \text{Hash}(\text{任务名} + \text{日期} + \text{小时}) \pmod {\text{jitter\_minutes}}$$
+  - **重启幂等**：同一天同一任务的偏移量恒定，服务即使重启当天节奏完全一致，**绝不会在同一时点重复触发两次**；
+  - **每日轮换**：换一天自动变换全新偏移时间，避免形成新的固定特征，对风控检测更友好；
+  - **时序说明**：当抖动窗口大于相邻任务间隔时，实际执行先后顺序可能调整，这是平摊峰值负载的自然表现。
+
+---
+
+### 🔄 错过窗口手动补跑接口（零上游增量）
+
+当遇到服务重启、服务器维护或刚添加新账号错过当期整点时，无需干等到下一个周期，支持即时补跑：
+
+#### 1. HTTP API 补跑（管理端点）
+- **请求格式**：
+  ```bash
+  POST /admin/tasks/{name}/run
+  # name 可选值：checkin / activity / keepalive / travel / school / cat
+  ```
+- **请求示例**：
+  ```bash
+  curl -s -X POST http://127.0.0.1:7863/admin/tasks/checkin/run \
+       -H "Authorization: Bearer <API_KEY>"
+  ```
+- **核心特性**：
+  - **202 Accepted 异步受理**：因为全池任务遍历打上游可能耗时数分钟，接口立即返回 202，后台异步排程补跑，进度直接输出在网关日志中；
+  - **409 Conflict 防连点**：若当前任务已有一趟在跑，立即返回 `409`，彻底避免并发连点对上游造成重复写；
+  - **零上游增量**：仅将既有任务提前执行一次，不额外增加任何多余请求。
+
+#### 2. CLI 命令行快捷补跑
+直接进入容器或使用宿主机快捷命令：
+```bash
+docker exec -it workbuddy2api ./acct.sh task checkin
+# 支持参数：checkin / activity / keepalive / travel / school / cat
+```
+
+---
+
 ## 🔒 安全保障与凭据管理
 
 ### 1. 凭据存储文件 (`.credentials`)
@@ -122,7 +203,7 @@ bash workbuddy-deploy.sh --auto
 cat /opt/wb2api/.credentials
 ```
 包含以下项：
-- `API_KEY`：网关内部通信密钥
+- `API_KEY`：网关内部通信与管理接口调用密钥
 - `ADMIN_PASSWORD`：面板管理员密码
 - `MANAGER_API_KEY`：对外 API 客户端调用密钥（格式为 `wbk_...`）
 
@@ -152,12 +233,14 @@ cat /opt/wb2api/.credentials
 [03] 容器启动：workbuddy2api (256M 限制), workbuddy-manager (320M 限制) 正常就绪
 [04] 流式输出：SSE 打字机传输无卡顿，600s 长连接保持稳定
 [05] 自动签发：API 密钥经重试自愈成功创建并持久化存储
+[06] 任务调度：6 大定时积分任务与散列抖动引擎启动，/admin/tasks/{name}/run 端点就绪
 ```
 
 ---
 
 ## 📄 开源许可与致谢
 
-- 网关本体：[workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) (MIT License)
-- 面板本体：[workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) (MIT License)
-- 本部署增强套件可按 MIT 协议自由修改、分发与使用。
+- 网关本体与定时任务引擎：[HanawaBanana/workbuddy2api](https://github.com/HanawaBanana/workbuddy2api) (原 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)) (MIT License)
+- 面板本体：[ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) (MIT License)
+- 自动化增强脚本与一键运维方案遵循 MIT 开源协议。
+
